@@ -5,6 +5,11 @@ import Network
 final actor RTMPSocket {
     static let defaultWindowSizeC = Int(UInt8.max)
 
+    enum ConnectionDisposition: Equatable {
+        case keepOpen
+        case close
+    }
+
     enum Error: Swift.Error {
         case invalidState
         case endOfStream
@@ -142,16 +147,43 @@ final actor RTMPSocket {
     }
 
     private func stateDidChange(to state: NWConnection.State) {
+        if Self.disposition(for: state) == .close {
+            switch state {
+            case .failed(let error):
+                logger.warn("Connection failed:", error)
+                close(error)
+            case .cancelled:
+                logger.info("Connection cancelled.")
+                close()
+            default:
+                break
+            }
+            return
+        }
         switch state {
         case .ready:
             logger.info("Connection is ready.")
+            // A connection can return to `.ready` after a transient `.waiting`.
+            // Keep the existing output consumer in that case so queued RTMP
+            // chunks remain serialized on one task and preserve wire order.
+            guard !connected else {
+                return
+            }
             connected = true
             let (stream, continuation) = AsyncStream<Data>.makeStream()
             Task {
-                for await data in stream where connected {
-                    try await send(data)
-                    totalBytesOut += data.count
-                    queueBytesOut -= data.count
+                do {
+                    for await data in stream where connected {
+                        try await send(data)
+                        totalBytesOut += data.count
+                        queueBytesOut -= data.count
+                    }
+                } catch let error as NWError {
+                    logger.warn("Connection send failed:", error)
+                    close(error)
+                } catch {
+                    logger.warn("Connection send failed:", String(describing: error))
+                    close()
                 }
             }
             self.outputs = continuation
@@ -159,17 +191,17 @@ final actor RTMPSocket {
             self.continuation = nil
         case .waiting(let error):
             logger.warn("Connection waiting:", error)
-            close(error)
+            // `.waiting` is explicitly nonterminal. Network.framework keeps the
+            // connection alive while it waits for a usable path and can move it
+            // back to `.ready` without another TCP/TLS handshake. Closing here
+            // turned short app-switch and interface-transition path changes into
+            // guaranteed RTMP disconnects.
         case .setup:
             logger.debug("Connection is setting up.")
         case .preparing:
             logger.debug("Connection is preparing.")
-        case .failed(let error):
-            logger.warn("Connection failed:", error)
-            close(error)
-        case .cancelled:
-            logger.info("Connection cancelled.")
-            close()
+        case .failed, .cancelled:
+            break
         @unknown default:
             logger.error("Unknown connection state.")
         }
@@ -177,8 +209,19 @@ final actor RTMPSocket {
 
     private func viabilityDidChange(to viability: Bool) {
         logger.info("Connection viability changed to ", viability)
-        if viability == false {
-            close()
+        // Viability is advisory and can recover. The NWConnection state handler
+        // remains authoritative: `.failed` and `.cancelled` close the socket,
+        // while temporary non-viability leaves the live flow intact.
+    }
+
+    nonisolated static func disposition(for state: NWConnection.State) -> ConnectionDisposition {
+        switch state {
+        case .failed, .cancelled:
+            return .close
+        case .setup, .waiting, .preparing, .ready:
+            return .keepOpen
+        @unknown default:
+            return .keepOpen
         }
     }
 
