@@ -172,18 +172,38 @@ final actor RTMPSocket {
             connected = true
             let (stream, continuation) = AsyncStream<Data>.makeStream()
             Task {
-                do {
-                    for await data in stream where connected {
+                for await data in stream where connected {
+                    do {
                         try await send(data)
                         totalBytesOut += data.count
                         queueBytesOut -= data.count
+                    } catch let error as NWError {
+                        // The chunk did not go out; account for it either way.
+                        queueBytesOut -= data.count
+                        // A send only throws on a genuine failure — Network.framework
+                        // QUEUES sends while the path is `.waiting`, it does not error.
+                        // But when the underlying connection has actually reached a
+                        // terminal state we must tear down so the publisher reconnects.
+                        // While it is still non-terminal (`.waiting`/`.preparing`/
+                        // `.ready`) closing here would defeat the `.waiting` keep-open
+                        // policy below and turn a transient blip (e.g. the host app was
+                        // backgrounded) into a hard RTMP disconnect. Drop just this
+                        // chunk and keep the session: the next send parks until
+                        // `.ready`, and a truly dead socket re-throws next iteration
+                        // once its state flips to `.failed`/`.cancelled`. HaishinKit
+                        // re-emits SPS/PPS + IDR on the next keyframe, so a single
+                        // dropped chunk self-heals.
+                        if Self.disposition(for: connection?.state ?? .cancelled) == .close {
+                            logger.warn("Connection send failed (terminal); closing:", error)
+                            close(error)
+                            break
+                        }
+                        logger.warn("Connection send failed (transient); dropping chunk:", error)
+                    } catch {
+                        logger.warn("Connection send failed:", String(describing: error))
+                        close()
+                        break
                     }
-                } catch let error as NWError {
-                    logger.warn("Connection send failed:", error)
-                    close(error)
-                } catch {
-                    logger.warn("Connection send failed:", String(describing: error))
-                    close()
                 }
             }
             self.outputs = continuation
