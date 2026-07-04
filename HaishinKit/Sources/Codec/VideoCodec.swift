@@ -72,6 +72,16 @@ final class VideoCodec {
                 }
             }
         } catch {
+            // VideoToolbox can invalidate a hardware compression session while
+            // an iOS screen-sharing app transitions to the background. Keeping
+            // that dead session makes every subsequent frame fail with
+            // kVTInvalidSessionErr. Drop it so the next frame creates a fresh
+            // session without tearing down the capture or network stream.
+            if case let VTSessionError.failedToConvert(status) = error,
+               status == kVTInvalidSessionErr {
+                session = nil
+                invalidateSession = true
+            }
             logger.warn(error)
         }
     }
