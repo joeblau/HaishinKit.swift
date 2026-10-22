@@ -8,23 +8,23 @@ enum VTSessionMode {
     func makeSession(_ videoCodec: VideoCodec) throws -> any VTSessionConvertible {
         switch self {
         case .compression:
-            var session: VTCompressionSession?
-            var status = VTCompressionSessionCreate(
-                allocator: kCFAllocatorDefault,
-                width: Int32(videoCodec.settings.videoSize.width),
-                height: Int32(videoCodec.settings.videoSize.height),
-                codecType: videoCodec.settings.format.codecType,
-                encoderSpecification: videoCodec.settings.makeEncoderSpecification(),
-                imageBufferAttributes: videoCodec.makeImageBufferAttributes(.compression) as CFDictionary?,
-                compressedDataAllocator: nil,
-                outputCallback: nil,
-                refcon: nil,
-                compressionSessionOut: &session
-            )
-            guard status == noErr, let session else {
-                throw VTSessionError.failedToCreate(status: status)
+            let session = try VTCompressionSessionFactory.make(
+                encoderSpecification: videoCodec.settings.makeEncoderSpecification()
+            ) { specification, session in
+                VTCompressionSessionCreate(
+                    allocator: kCFAllocatorDefault,
+                    width: Int32(videoCodec.settings.videoSize.width),
+                    height: Int32(videoCodec.settings.videoSize.height),
+                    codecType: videoCodec.settings.format.codecType,
+                    encoderSpecification: specification,
+                    imageBufferAttributes: videoCodec.makeImageBufferAttributes(.compression) as CFDictionary?,
+                    compressedDataAllocator: nil,
+                    outputCallback: nil,
+                    refcon: nil,
+                    compressionSessionOut: &session
+                )
             }
-            status = session.setOptions(videoCodec.settings.makeOptions())
+            var status = session.setOptions(videoCodec.settings.makeOptions())
             guard status == noErr else {
                 throw VTSessionError.failedToPrepare(status: status)
             }

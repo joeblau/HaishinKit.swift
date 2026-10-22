@@ -92,7 +92,7 @@ final class VideoCodec {
             var attributes: [NSString: AnyObject] = [:]
             if let inputFormat {
                 // Specify the pixel format of the uncompressed video.
-                attributes[kCVPixelBufferPixelFormatTypeKey] = inputFormat.mediaType.rawValue as CFNumber
+                attributes[kCVPixelBufferPixelFormatTypeKey] = CMFormatDescriptionGetMediaSubType(inputFormat) as CFNumber
             }
             return attributes.isEmpty ? nil : attributes
         case .decompression:
